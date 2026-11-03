@@ -15,15 +15,15 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Smoke-test engine import
         run: python -c "import saak_engine; print('engine ok')"
-      - run: pyinstaller --noconfirm --onefile --windowed --name SAAK_Image_Downloader --icon app.ico --add-data "app.ico;." saak_app.py
+      - run: pyinstaller --noconfirm --onefile --windowed --name Product_Image_Downloader --icon app.ico --add-data "app.ico;." saak_app.py
       - uses: actions/upload-artifact@v4
-        with: { name: SAAK_Image_Downloader, path: dist/SAAK_Image_Downloader.exe }
+        with: { name: Product_Image_Downloader, path: dist/Product_Image_Downloader.exe }
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0
-          name: SAAK Image Downloader v2.0
+          tag_name: v2.1
+          name: Product Image Downloader v2.1
           make_latest: true
           body: |
             تطبيق سطح مكتب (Windows) لتنزيل صور منتجات ساك الأصلية مع فهرس CSV وأرشيف ZIP.
-            حمّل SAAK_Image_Downloader.exe وشغّله مباشرة — لا يحتاج Python.
-          files: dist/SAAK_Image_Downloader.exe
+            حمّل Product_Image_Downloader.exe وشغّله مباشرة — لا يحتاج Python.
+          files: dist/Product_Image_Downloader.exe

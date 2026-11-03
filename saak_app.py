@@ -1,4 +1,4 @@
-"""SAAK Image Downloader — Desktop GUI (Tkinter, Arabic)."""
+"""Website Product Image Downloader — Desktop GUI (Tkinter, Arabic)."""
 from __future__ import annotations
 
 import json
@@ -11,11 +11,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from saak_engine import Crawler, Settings, DEFAULT_START
+from saak_engine import Crawler, Settings, DEFAULT_START, normalize_start, site_folder_name
 
-APP_NAME = "منزّل صور منتجات ساك"
-VERSION = "2.0"
-CFG = Path(os.environ.get("APPDATA", Path.home())) / "SAAK_Downloader" / "settings.json"
+APP_NAME = "منزّل صور المنتجات من المواقع"
+VERSION = "2.1"
+CFG = Path(os.environ.get("APPDATA", Path.home())) / "Product_Image_Downloader" / "settings.json"
 FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 
@@ -46,8 +46,10 @@ class App(tk.Tk):
         self.worker: threading.Thread | None = None
         self.vars = {
             "url": tk.StringVar(value=DEFAULT_START),
-            "out": tk.StringVar(value=str(Path.home() / "Downloads" / "SAAK_Product_Images")),
-            "filter": tk.StringVar(value="/منتجاتنا"),
+            "base": tk.StringVar(value=str(Path.home() / "Downloads")),
+            "filter": tk.StringVar(value=""),
+            "samepath": tk.BooleanVar(value=True),
+            "cdn": tk.BooleanVar(value=True),
             "pages": tk.IntVar(value=500),
             "depth": tk.IntVar(value=5),
             "minpx": tk.IntVar(value=180),
@@ -80,7 +82,7 @@ class App(tk.Tk):
         hdr.pack(fill="x")
         tk.Label(hdr, text=APP_NAME, bg="#123b5c", fg="white",
                  font=("Segoe UI", 15, "bold")).pack(side="right", padx=14, pady=8)
-        tk.Label(hdr, text="تنزيل صور المنتجات الأصلية + فهرس CSV + أرشيف ZIP",
+        tk.Label(hdr, text="الصق رابط أي موقع أو صفحة منتجات ← صور أصلية + فهرس CSV + أرشيف ZIP",
                  bg="#123b5c", fg="#cfe3f2").pack(side="right", padx=4)
 
         frm = ttk.LabelFrame(self, text="الإعدادات")
@@ -93,10 +95,13 @@ class App(tk.Tk):
             if extra:
                 extra.grid(row=r, column=0, padx=6, pady=3)
 
-        row(0, "رابط البداية:", ttk.Entry(frm, textvariable=self.vars["url"]))
-        row(1, "مجلد الحفظ:", ttk.Entry(frm, textvariable=self.vars["out"]),
+        self.url_entry = ttk.Entry(frm, textvariable=self.vars["url"])
+        row(0, "رابط الموقع / الصفحة:", self.url_entry,
+            ttk.Button(frm, text="لصق", command=self._paste))
+        self._enable_clipboard(self.url_entry)
+        row(1, "مجلد الحفظ:", ttk.Entry(frm, textvariable=self.vars["base"]),
             ttk.Button(frm, text="استعراض…", command=self._browse))
-        row(2, "مرشح المسار:", ttk.Entry(frm, textvariable=self.vars["filter"]))
+        row(2, "مرشح المسار (اختياري):", ttk.Entry(frm, textvariable=self.vars["filter"]))
         row(3, "كلمات استبعاد إضافية (مفصولة بفاصلة):", ttk.Entry(frm, textvariable=self.vars["skip"]))
 
         nums = ttk.Frame(frm)
@@ -111,6 +116,8 @@ class App(tk.Tk):
 
         chk = ttk.Frame(frm)
         chk.grid(row=5, column=0, columnspan=3, sticky="e")
+        ttk.Checkbutton(chk, text="البقاء داخل مسار الرابط", variable=self.vars["samepath"]).pack(side="right", padx=8)
+        ttk.Checkbutton(chk, text="قبول صور CDN/نطاقات أخرى", variable=self.vars["cdn"]).pack(side="right", padx=8)
         ttk.Checkbutton(chk, text="احترام robots.txt", variable=self.vars["robots"]).pack(side="right", padx=8)
         ttk.Checkbutton(chk, text="إنشاء أرشيف ZIP", variable=self.vars["zip"]).pack(side="right", padx=8)
 
@@ -148,13 +155,40 @@ class App(tk.Tk):
         ttk.Label(self, textvariable=self.status, anchor="e", relief="sunken").pack(fill="x", side="bottom")
 
     # ------------------------------------------------------------ actions
+    def _out_dir(self) -> Path:
+        return Path(self.vars["base"].get().strip()) / site_folder_name(self.vars["url"].get())
+
+    def _paste(self):
+        try:
+            self.vars["url"].set(self.clipboard_get().strip())
+        except tk.TclError:
+            pass
+
+    def _enable_clipboard(self, entry):
+        # Ctrl+V/C/X/A work on any keyboard layout (Arabic too) + right-click menu
+        def on_key(e):
+            if not (e.state & 0x4):
+                return
+            k = {86: "<<Paste>>", 67: "<<Copy>>", 88: "<<Cut>>"}.get(e.keycode)
+            if k:
+                entry.event_generate(k); return "break"
+            if e.keycode == 65:
+                entry.select_range(0, "end"); entry.icursor("end"); return "break"
+        entry.bind("<Control-KeyPress>", on_key)
+        menu = tk.Menu(entry, tearoff=0)
+        menu.add_command(label="لصق", command=lambda: entry.event_generate("<<Paste>>"))
+        menu.add_command(label="نسخ", command=lambda: entry.event_generate("<<Copy>>"))
+        menu.add_command(label="قص", command=lambda: entry.event_generate("<<Cut>>"))
+        menu.add_command(label="تحديد الكل", command=lambda: entry.select_range(0, "end"))
+        entry.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
+
     def _browse(self):
-        d = filedialog.askdirectory(initialdir=str(Path(self.vars["out"].get()).parent))
+        d = filedialog.askdirectory(initialdir=self.vars["base"].get())
         if d:
-            self.vars["out"].set(str(Path(d) / "SAAK_Product_Images"))
+            self.vars["base"].set(str(Path(d)))
 
     def _open(self, what):
-        out = Path(self.vars["out"].get())
+        out = self._out_dir()
         target = out if what == "dir" else out / "image_index.csv"
         if not target.exists():
             messagebox.showinfo(APP_NAME, "لم يُنشأ بعد. ابدأ التنزيل أولًا.")
@@ -163,8 +197,11 @@ class App(tk.Tk):
 
     def _settings(self) -> Settings:
         v = self.vars
-        return Settings(start_url=v["url"].get().strip(), out_dir=Path(v["out"].get().strip()),
-                        path_filter=v["filter"].get().strip(), max_pages=int(v["pages"].get()),
+        url = normalize_start(v["url"].get())
+        v["url"].set(url)
+        return Settings(start_url=url, out_dir=self._out_dir(),
+                        path_filter=v["filter"].get().strip(), same_path_only=v["samepath"].get(),
+                        allow_cdn=v["cdn"].get(), max_pages=int(v["pages"].get()),
                         max_depth=int(v["depth"].get()), min_px=int(v["minpx"].get()),
                         min_bytes=int(v["minkb"].get()) * 1000, delay=float(v["delay"].get()),
                         respect_robots=v["robots"].get(), make_zip=v["zip"].get(),
@@ -176,8 +213,9 @@ class App(tk.Tk):
         except (tk.TclError, ValueError):
             messagebox.showerror(APP_NAME, "قيمة رقمية غير صالحة في الإعدادات.")
             return
-        if not s.start_url.startswith(("http://", "https://")):
-            messagebox.showerror(APP_NAME, "رابط البداية غير صالح.")
+        from urllib.parse import urlparse
+        if not urlparse(s.start_url).netloc or "." not in urlparse(s.start_url).netloc:
+            messagebox.showerror(APP_NAME, "الرابط غير صالح. مثال: https://example.com/products")
             return
         self._save_cfg()
         self.txt.delete("1.0", "end")
@@ -224,7 +262,7 @@ class App(tk.Tk):
                         self.status.set(f"{'أُوقف' if data['stopped'] else 'اكتمل'} — "
                                         f"{data['records']} صورة في الفهرس")
                         if data["records"] and messagebox.askyesno(APP_NAME, "انتهى التنزيل. فتح المجلد؟"):
-                            open_path(self.vars["out"].get())
+                            open_path(self._out_dir())
                     else:
                         self.status.set("خطأ")
                         messagebox.showerror(APP_NAME, data)

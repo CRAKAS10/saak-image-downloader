@@ -1,6 +1,6 @@
-"""SAAK product-image crawler engine (GUI-independent).
+"""Generic product-image crawler engine (GUI-independent).
 
-Crawls the public product pages of a site, downloads product images at
+Crawls the public pages of ANY website, downloads product images at
 original quality, writes image_index.csv and an optional ZIP archive.
 """
 from __future__ import annotations
@@ -33,8 +33,10 @@ FIELDS = ["page_title", "image_alt", "category", "image_url", "page_url",
 @dataclass
 class Settings:
     start_url: str = DEFAULT_START
-    out_dir: Path = Path("SAAK_Product_Images")
-    path_filter: str = "/منتجاتنا"      # only crawl/collect pages whose path contains this
+    out_dir: Path = Path("Downloaded_Images")
+    path_filter: str = ""               # optional: only crawl pages whose path contains this
+    same_path_only: bool = True         # stay under the start URL's folder when no filter is given
+    allow_cdn: bool = True              # accept images hosted on other domains (CDN)
     max_pages: int = 500
     max_depth: int = 5
     min_bytes: int = 5000
@@ -55,6 +57,19 @@ class Stats:
     failed: int = 0
 
 
+def normalize_start(url: str) -> str:
+    url = (url or "").strip().strip('"\'')
+    if not re.match(r"^https?://", url, re.I):
+        url = "https://" + url.lstrip("/")
+    return url
+
+
+def site_folder_name(url: str) -> str:
+    host = urllib.parse.urlparse(normalize_start(url)).netloc.lower()
+    host = host[4:] if host.startswith("www.") else host
+    return safe(host.replace(":", "_")) + "_Images"
+
+
 def safe(s: str, n: int = 110) -> str:
     s = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", s or "").strip(" .")
     return s[:n] or "product"
@@ -72,8 +87,13 @@ class Crawler:
         self.session = requests.Session()
         self.session.headers.update(
             {"User-Agent": "Mozilla/5.0 (compatible; ProductCatalogArchiver/2.0)"})
+        settings.start_url = normalize_start(settings.start_url)
         p = urllib.parse.urlparse(settings.start_url)
         host = p.netloc.lower()
+        sp = urllib.parse.unquote(p.path)
+        last = sp.rstrip("/").rsplit("/", 1)[-1]
+        # "/ar/products" -> folder; "/ar/list.html" -> parent folder
+        self.start_dir = (sp.rstrip("/") + "/") if ("." not in last) else (sp.rsplit("/", 1)[0] + "/")
         bare = host[4:] if host.startswith("www.") else host
         self.hosts = {bare, "www." + bare}
         self.robots = None
@@ -98,17 +118,24 @@ class Crawler:
         except Exception:
             return True
 
-    def normalize(self, url, source):
-        if not url:
+    def normalize(self, url, source, any_host=False, keep_query=False):
+        if not url or url.strip().startswith(("data:", "javascript:", "mailto:", "#")):
             return None
         url = urllib.parse.urljoin(source, url.strip())
         p = urllib.parse.urlparse(url)
-        if p.scheme not in ("http", "https") or p.netloc.lower() not in self.hosts:
+        if p.scheme not in ("http", "https"):
             return None
-        return urllib.parse.urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+        if not any_host and p.netloc.lower() not in self.hosts:
+            return None
+        return urllib.parse.urlunparse((p.scheme, p.netloc, p.path, "", p.query if keep_query else "", ""))
 
     def in_scope(self, url: str) -> bool:
-        return self.s.path_filter in urllib.parse.unquote(url)
+        path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
+        if self.s.path_filter:
+            return self.s.path_filter in path
+        if self.s.same_path_only:
+            return (path if path.endswith("/") else path + "/").startswith(self.start_dir) or path == self.start_dir.rstrip("/")
+        return True
 
     def get(self, url):
         last = None
@@ -166,6 +193,12 @@ class Crawler:
             except Exception as e:
                 if self.stop_event.is_set():
                     break
+                if depth == 0 and url.startswith("https://"):
+                    alt = "http://" + url[8:]
+                    self.log("تعذّر https — إعادة المحاولة عبر http")
+                    s.start_url = alt
+                    queue.appendleft((alt, 0))
+                    continue
                 self.stats.failed += 1
                 self.log(f"فشل الصفحة: {urllib.parse.unquote(url)} — {e}")
                 continue
@@ -175,17 +208,23 @@ class Crawler:
                 continue
             self.log(f"صفحة [{depth}]: {urllib.parse.unquote(url)}")
             h = soup.find("h1") or soup.title
-            title = safe(h.get_text(" ", strip=True) if h else "SAAK")
+            title = safe(h.get_text(" ", strip=True) if h else "page")
             parts = [x for x in urllib.parse.unquote(urllib.parse.urlparse(url).path).split("/") if x]
             key = s.path_filter.strip("/")
-            if key in parts and parts.index(key) + 1 < len(parts):
-                category = safe(parts[parts.index(key) + 1])      # first segment after /منتجاتنا
+            if key and key in parts and parts.index(key) + 1 < len(parts):
+                category = safe(parts[parts.index(key) + 1])      # first segment after the filter
             else:
-                category = safe(parts[-2] if len(parts) >= 2 else "منتجات")
+                category = safe(parts[-2] if len(parts) >= 2 else (parts[0] if parts else "عام"))
             if key and category == key:
                 category = "عام"
 
-            for tag in soup.find_all(["img", "source"]):
+            for m in soup.select('meta[property="og:image"], meta[name="twitter:image"]'):
+                if m.get("content"):
+                    m["src"] = m["content"]
+                    m["alt"] = title
+            for tag in soup.find_all(["img", "source", "meta"]):
+                if tag.name == "meta" and not tag.get("src"):
+                    continue
                 if self.stop_event.is_set():
                     break
                 cands = [tag.get("data-src"), tag.get("data-lazy-src"), tag.get("data-original"), tag.get("src")]
@@ -194,11 +233,11 @@ class Crawler:
                         cands.extend(re.sub(r"\s+\d+(\.\d+)?[wx]$", "", x.strip())
                                      for x in tag[attr].split(","))
                 for cand in cands:
-                    src = self.normalize(cand, url)
+                    src = self.normalize(cand, url, any_host=s.allow_cdn, keep_query=True)
                     if not src or src in seen_src:
                         continue
                     p = urllib.parse.urlparse(src)
-                    if not IMG_RE.search(p.path):
+                    if not IMG_RE.search(p.path) and not re.search(r"(format|fm|ext)=(jpe?g|png|webp|avif)", p.query, re.I):
                         continue
                     alt = safe(tag.get("alt", "") or "")
                     if any(k in (p.path + " " + alt).lower() for k in skip_words):
@@ -230,7 +269,9 @@ class Crawler:
                         seen_hash.add(digest_c)
                         folder = out / category
                         folder.mkdir(parents=True, exist_ok=True)
-                        ext = Path(p.path).suffix.lower() or ".jpg"
+                        ext = Path(p.path).suffix.lower()
+                        if ext not in (".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif"):
+                            ext = "." + (r.headers.get("Content-Type", "image/jpeg").split("/")[-1].split(";")[0].replace("jpeg", "jpg"))
                         name = safe(alt or urllib.parse.unquote(Path(p.path).stem)) + "_" + digest_c[:10] + ext
                         path = folder / name
                         path.write_bytes(data)
@@ -274,15 +315,17 @@ class Crawler:
 
 if __name__ == "__main__":  # CLI mode
     import argparse
-    ap = argparse.ArgumentParser(description="SAAK product image downloader")
+    ap = argparse.ArgumentParser(description="Website product image downloader")
     ap.add_argument("--url", default=DEFAULT_START)
-    ap.add_argument("--out", default="SAAK_Product_Images")
-    ap.add_argument("--filter", default="/منتجاتنا")
+    ap.add_argument("--out", default="")
+    ap.add_argument("--filter", default="")
+    ap.add_argument("--whole-site", action="store_true")
     ap.add_argument("--max-pages", type=int, default=500)
     ap.add_argument("--depth", type=int, default=5)
     ap.add_argument("--no-robots", action="store_true")
     ap.add_argument("--no-zip", action="store_true")
     a = ap.parse_args()
-    Crawler(Settings(start_url=a.url, out_dir=Path(a.out), path_filter=a.filter,
+    Crawler(Settings(start_url=a.url, out_dir=Path(a.out or site_folder_name(a.url)), path_filter=a.filter,
+                     same_path_only=not a.whole_site,
                      max_pages=a.max_pages, max_depth=a.depth,
                      respect_robots=not a.no_robots, make_zip=not a.no_zip)).run()
