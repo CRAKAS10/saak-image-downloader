@@ -1,0 +1,6 @@
+__pycache__/
+build/
+dist/
+*.spec
+SAAK_Product_Images/
+*.zip
