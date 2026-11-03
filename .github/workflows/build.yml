@@ -1,7 +1,7 @@
-name: Build Windows EXE
+name: Build & Release Windows EXE
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: write
@@ -13,9 +13,17 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -r requirements.txt
+      - name: Smoke-test engine import
+        run: python -c "import saak_engine; print('engine ok')"
       - run: pyinstaller --noconfirm --onefile --windowed --name SAAK_Image_Downloader --icon app.ico --add-data "app.ico;." saak_app.py
       - uses: actions/upload-artifact@v4
         with: { name: SAAK_Image_Downloader, path: dist/SAAK_Image_Downloader.exe }
-      - if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with: { files: dist/SAAK_Image_Downloader.exe }
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0
+          name: SAAK Image Downloader v2.0
+          make_latest: true
+          body: |
+            تطبيق سطح مكتب (Windows) لتنزيل صور منتجات ساك الأصلية مع فهرس CSV وأرشيف ZIP.
+            حمّل SAAK_Image_Downloader.exe وشغّله مباشرة — لا يحتاج Python.
+          files: dist/SAAK_Image_Downloader.exe
